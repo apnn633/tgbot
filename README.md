@@ -22,7 +22,7 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/your-username/tgbot.git
+git clone https://github.com/apnn633/tgbot.git
 cd tgbot
 
 # 安装依赖
