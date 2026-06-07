@@ -1,8 +1,6 @@
 #!/bin/bash
 # 启动丛雨 Telegram Bot
 
-cd /home/nk/tgbot
-
 # 检查.env文件是否存在
 if [ ! -f ".env" ]; then
     echo "错误: .env 文件不存在"
