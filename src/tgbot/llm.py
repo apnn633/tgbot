@@ -18,11 +18,20 @@ from .database import db
 from .prompts import (
     CONVERSATION_NAMING_PROMPT,
     IMAGE_ANALYSIS_PROMPT,
+    MARKDOWN_ALLOWED_SUPPLEMENT,
     SYSTEM_PROMPT,
     VOICE_MODE_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_system_prompt() -> str:
+    """Build system prompt based on configuration."""
+    prompt = SYSTEM_PROMPT
+    if config.allow_markdown_output:
+        prompt += MARKDOWN_ALLOWED_SUPPLEMENT
+    return prompt
 
 
 def is_glm_model(model: str) -> bool:
@@ -213,7 +222,7 @@ class LLMClient:
     def _get_history(self, conversation_id: int) -> list[dict]:
         """Get conversation history with system prompt."""
         messages = db.get_messages(conversation_id, limit=MAX_HISTORY_MESSAGES)
-        history = [{"role": "system", "content": SYSTEM_PROMPT}]
+        history = [{"role": "system", "content": _build_system_prompt()}]
         history.extend(messages)
         return history
 
@@ -263,7 +272,7 @@ class LLMClient:
 
         conv_id = self._get_or_create_conversation(user_id)
 
-        voice_system_prompt = SYSTEM_PROMPT + VOICE_MODE_PROMPT
+        voice_system_prompt = _build_system_prompt() + VOICE_MODE_PROMPT
         temp_history = [{"role": "system", "content": voice_system_prompt}]
 
         messages = db.get_messages(conv_id, limit=MAX_HISTORY_MESSAGES)
@@ -383,7 +392,7 @@ class LLMClient:
         response, _ = await self._call_multimodal_with_fallback(
             self._build_image_content,
             (image_data, analyze_prompt, image_url),
-            SYSTEM_PROMPT,
+            _build_system_prompt(),
             mode,
         )
 
@@ -413,7 +422,7 @@ class LLMClient:
         if caption:
             analyze_prompt = f"图片说明: {caption}\n{analyze_prompt}"
 
-        system_prompt = SYSTEM_PROMPT + VOICE_MODE_PROMPT
+        system_prompt = _build_system_prompt() + VOICE_MODE_PROMPT
         result, _ = await self._call_multimodal_with_fallback(
             self._build_image_content,
             (image_data, analyze_prompt, image_url),
@@ -450,7 +459,7 @@ class LLMClient:
         response, _ = await self._call_multimodal_with_fallback(
             self._build_video_content,
             (video_data, analyze_prompt, video_url),
-            SYSTEM_PROMPT,
+            _build_system_prompt(),
             mode,
         )
 

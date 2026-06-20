@@ -224,6 +224,13 @@ class Config:
     )
 
     # ============================================================
+    # 输出格式设置
+    # ============================================================
+    allow_markdown_output: bool = field(
+        default_factory=lambda: _get_bool("ALLOW_MARKDOWN_OUTPUT", False)
+    )
+
+    # ============================================================
     # 通用设置
     # ============================================================
     max_tokens: int = field(default_factory=lambda: _get_int("MAX_TOKENS", DEFAULT_MAX_TOKENS))
@@ -376,6 +383,7 @@ class Config:
             "TTS 服务": self.tts_provider if self.tts_api_key or self.is_inworld_configured() else "未配置",
             "TTS 输出模式": self.tts_output_mode,
             "搜索功能": "已启用" if self.enable_search and self.is_serpapi_configured() else "未启用",
+            "Markdown 输出": "已启用" if self.allow_markdown_output else "未启用",
             "Webhook": self.webhook_url or "未配置 (将使用 Polling)",
             "认证白名单": f"{len(self.allowed_user_ids)} 个用户" if self.allowed_user_ids else "未设置",
         }
