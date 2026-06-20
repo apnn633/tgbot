@@ -2,9 +2,23 @@
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
 
 from dotenv import load_dotenv
+
+from .constants import (
+    DEFAULT_API_TIMEOUT,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_PAIRING_TTL,
+    MULTIMODAL_MODE_AUTO,
+    STT_PROVIDER_OPENAI,
+    TTS_OUTPUT_LLM,
+    TTS_PROVIDER_OPENAI,
+    VALID_MULTIMODAL_MODES,
+    VALID_STT_PROVIDERS,
+    VALID_TTS_OUTPUT_MODES,
+    VALID_TTS_PROVIDERS,
+)
 
 load_dotenv()
 
@@ -28,6 +42,20 @@ def _get_int(key: str, default: int) -> int:
         return int(os.getenv(key, str(default)))
     except ValueError:
         return default
+
+
+def _validate_choice(value: str, valid_choices: set[str], field_name: str, default: str) -> str:
+    """Validate that a value is within allowed choices.
+
+    Returns the value if valid, otherwise logs a warning and returns the default.
+    """
+    if value not in valid_choices:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"Invalid {field_name}: '{value}', valid options: {valid_choices}. Using default: '{default}'"
+        )
+        return default
+    return value
 
 
 @dataclass
@@ -64,7 +92,7 @@ class Config:
         ]
     )
     pairing_code_ttl: int = field(
-        default_factory=lambda: int(os.getenv("PAIRING_CODE_TTL", "300"))
+        default_factory=lambda: _get_int("PAIRING_CODE_TTL", DEFAULT_PAIRING_TTL)
     )
 
     # ============================================================
@@ -83,13 +111,13 @@ class Config:
     # ============================================================
     # 多模态 API 配置 (无问芯穹 / OpenAI Vision)
     # ============================================================
-    # 多模态模式:
-    #   "auto" - 自动选择：对话AI配置则两步模式，否则使用多模态AI直接回复
-    #   "two_step" - 两步模式：多模态AI分析 -> 对话AI生成回复（需同时配置两个API）
-    #   "direct" - 直接模式：多模态AI直接回复（只需配置多模态API）
-    #   "disabled" - 禁用：不支持图片/视频（只需配置对话API）
     multimodal_mode: str = field(
-        default_factory=lambda: os.getenv("MULTIMODAL_MODE", "auto")
+        default_factory=lambda: _validate_choice(
+            os.getenv("MULTIMODAL_MODE", MULTIMODAL_MODE_AUTO),
+            VALID_MULTIMODAL_MODES,
+            "MULTIMODAL_MODE",
+            MULTIMODAL_MODE_AUTO,
+        )
     )
     multimodal_api_key: str = field(
         default_factory=lambda: os.getenv("MULTIMODAL_API_KEY", "")
@@ -102,7 +130,6 @@ class Config:
         default_factory=lambda: os.getenv("MULTIMODAL_MODEL", "qwen3-vl-plus")
     )
     # 强制使用 Base64 传输图片/视频（禁用 URL 模式）
-    # 设为 true 可避免 URL 访问失败的问题
     force_base64_image: bool = field(
         default_factory=lambda: _get_bool("FORCE_BASE64_IMAGE", False)
     )
@@ -116,9 +143,13 @@ class Config:
     # ============================================================
     # STT API 配置 (讯飞 / OpenAI Whisper)
     # ============================================================
-    # STT 服务类型: "openai" 或 "xunfei"
     stt_provider: str = field(
-        default_factory=lambda: os.getenv("STT_PROVIDER", "openai")
+        default_factory=lambda: _validate_choice(
+            os.getenv("STT_PROVIDER", STT_PROVIDER_OPENAI),
+            VALID_STT_PROVIDERS,
+            "STT_PROVIDER",
+            STT_PROVIDER_OPENAI,
+        )
     )
     # OpenAI Whisper
     stt_api_key: str = field(
@@ -144,9 +175,13 @@ class Config:
     # ============================================================
     # TTS API 配置 (InworldTTS / OpenAI TTS)
     # ============================================================
-    # TTS 服务类型: "openai" 或 "inworld"
     tts_provider: str = field(
-        default_factory=lambda: os.getenv("TTS_PROVIDER", "openai")
+        default_factory=lambda: _validate_choice(
+            os.getenv("TTS_PROVIDER", TTS_PROVIDER_OPENAI),
+            VALID_TTS_PROVIDERS,
+            "TTS_PROVIDER",
+            TTS_PROVIDER_OPENAI,
+        )
     )
     # OpenAI TTS
     tts_api_key: str = field(
@@ -168,9 +203,14 @@ class Config:
     inworld_voice_id: str = field(
         default_factory=lambda: os.getenv("INWORLD_VOICE_ID", "")
     )
-    # TTS输出模式: "llm_output" (AI直接输出日语) 或 "translate" (翻译)
+    # TTS输出模式
     tts_output_mode: str = field(
-        default_factory=lambda: os.getenv("TTS_OUTPUT_MODE", "llm_output")
+        default_factory=lambda: _validate_choice(
+            os.getenv("TTS_OUTPUT_MODE", TTS_OUTPUT_LLM),
+            VALID_TTS_OUTPUT_MODES,
+            "TTS_OUTPUT_MODE",
+            TTS_OUTPUT_LLM,
+        )
     )
 
     # ============================================================
@@ -179,7 +219,6 @@ class Config:
     serpapi_api_key: str = field(
         default_factory=lambda: os.getenv("SERPAPI_API_KEY", "")
     )
-    # 是否启用搜索功能
     enable_search: bool = field(
         default_factory=lambda: _get_bool("ENABLE_SEARCH", False)
     )
@@ -187,11 +226,11 @@ class Config:
     # ============================================================
     # 通用设置
     # ============================================================
-    max_tokens: int = field(default_factory=lambda: int(os.getenv("MAX_TOKENS", "1000")))
-    
+    max_tokens: int = field(default_factory=lambda: _get_int("MAX_TOKENS", DEFAULT_MAX_TOKENS))
+
     # API 超时和重试配置
-    api_timeout: float = field(default_factory=lambda: _get_float("API_TIMEOUT", 60.0))
-    api_max_retries: int = field(default_factory=lambda: _get_int("API_MAX_RETRIES", 3))
+    api_timeout: float = field(default_factory=lambda: _get_float("API_TIMEOUT", DEFAULT_API_TIMEOUT))
+    api_max_retries: int = field(default_factory=lambda: _get_int("API_MAX_RETRIES", DEFAULT_MAX_RETRIES))
 
     # 日志配置
     log_pretty: bool = field(default_factory=lambda: _get_bool("LOG_PRETTY", True))
@@ -246,10 +285,10 @@ class Config:
             )
         # 回退到对话API
         return self.get_chat_config()
-    
+
     def get_multimodal_mode(self) -> str:
         """Get effective multimodal mode based on configuration.
-        
+
         Returns:
             "two_step" - 多模态分析 + 对话生成回复
             "direct" - 多模态直接回复
@@ -258,7 +297,7 @@ class Config:
         mode = self.multimodal_mode.lower()
         has_chat = bool(self.chat_api_key)
         has_multimodal = bool(self.multimodal_api_key)
-        
+
         if mode == "disabled":
             return "disabled"
         elif mode == "direct":
@@ -279,7 +318,7 @@ class Config:
             elif has_chat:
                 return "disabled"
             return "disabled"
-    
+
     def is_multimodal_enabled(self) -> bool:
         """Check if multimodal (image/video) support is enabled."""
         return self.get_multimodal_mode() != "disabled"
@@ -321,10 +360,25 @@ class Config:
         if not self.chat_api_key:
             missing.append("CHAT_API_KEY (或 OPENAI_API_KEY)")
 
-        # WEBHOOK_URL 只在 webhook 模式下必需，polling 模式不需要
-        # 不再强制要求
-
         return missing
+
+    def get_config_summary(self) -> dict[str, str]:
+        """Get a summary of the current configuration status.
+
+        Returns a dict of config categories and their status ('configured' / 'not configured').
+        Useful for startup diagnostics and debugging.
+        """
+        return {
+            "对话模型": f"{self.chat_model} @ {self.chat_base_url}" if self.chat_api_key else "未配置",
+            "多模态模式": self.get_multimodal_mode(),
+            "多模态模型": f"{self.multimodal_model}" if self.multimodal_api_key else "未配置",
+            "STT 服务": self.stt_provider if self.stt_api_key or self.is_xunfei_configured() else "未配置",
+            "TTS 服务": self.tts_provider if self.tts_api_key or self.is_inworld_configured() else "未配置",
+            "TTS 输出模式": self.tts_output_mode,
+            "搜索功能": "已启用" if self.enable_search and self.is_serpapi_configured() else "未启用",
+            "Webhook": self.webhook_url or "未配置 (将使用 Polling)",
+            "认证白名单": f"{len(self.allowed_user_ids)} 个用户" if self.allowed_user_ids else "未设置",
+        }
 
 
 config = Config()

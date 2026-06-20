@@ -1,13 +1,11 @@
 """SQLite database module for the bot."""
 
-import json
 import logging
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +43,10 @@ class Database:
         """Initialize database tables."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            
+
             # 启用外键约束
             cursor.execute("PRAGMA foreign_keys = ON")
-            
+
             # 授权用户表
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS authorized_users (
@@ -58,7 +56,7 @@ class Database:
                     authorized_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            
+
             # 配对码表
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS pairing_codes (
@@ -68,7 +66,7 @@ class Database:
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            
+
             # 对话表
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS conversations (
@@ -81,7 +79,7 @@ class Database:
                     FOREIGN KEY (user_id) REFERENCES authorized_users(user_id)
                 )
             """)
-            
+
             # 消息表
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
@@ -93,7 +91,7 @@ class Database:
                     FOREIGN KEY (conversation_id) REFERENCES conversations(id)
                 )
             """)
-            
+
             # 用户设置表（存储当前活跃对话）
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_settings (
@@ -104,12 +102,12 @@ class Database:
                     FOREIGN KEY (active_conversation_id) REFERENCES conversations(id)
                 )
             """)
-            
+
             # 创建索引以提升查询性能
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_settings_user ON user_settings(user_id)")
-            
+
             conn.commit()
             logger.info("Database initialized with foreign keys and indexes")
 
@@ -178,7 +176,7 @@ class Database:
             """, (code, user_id, user_info))
             conn.commit()
 
-    def get_pairing_code(self, code: str) -> Optional[dict]:
+    def get_pairing_code(self, code: str) -> dict | None:
         """Get pairing code info."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -193,7 +191,7 @@ class Database:
             cursor.execute("DELETE FROM pairing_codes WHERE code = ?", (code,))
             conn.commit()
 
-    def get_user_pending_code(self, user_id: int) -> Optional[dict]:
+    def get_user_pending_code(self, user_id: int) -> dict | None:
         """Get pending pairing code for a user."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -206,7 +204,7 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                DELETE FROM pairing_codes 
+                DELETE FROM pairing_codes
                 WHERE datetime(created_at, '+' || ? || ' seconds') < datetime('now')
             """, (ttl_seconds,))
             conn.commit()
@@ -224,7 +222,7 @@ class Database:
             """, (user_id, name))
             conv_id = cursor.lastrowid
             conn.commit()
-            
+
             return Conversation(
                 id=conv_id,
                 user_id=user_id,
@@ -233,7 +231,7 @@ class Database:
                 updated_at=datetime.now().isoformat(),
             )
 
-    def get_conversation(self, conv_id: int) -> Optional[Conversation]:
+    def get_conversation(self, conv_id: int) -> Conversation | None:
         """Get a conversation by ID."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -255,8 +253,8 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT * FROM conversations 
-                WHERE user_id = ? AND is_active = 1 
+                SELECT * FROM conversations
+                WHERE user_id = ? AND is_active = 1
                 ORDER BY updated_at DESC
             """, (user_id,))
             return [
@@ -275,20 +273,20 @@ class Database:
         """Delete a conversation. If only one remains, reset all IDs."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            
+
             # 检查当前有多少活跃对话
             cursor.execute("""
                 SELECT COUNT(*) FROM conversations WHERE user_id = ? AND is_active = 1
             """, (user_id,))
             active_count = cursor.fetchone()[0]
-            
+
             # 软删除指定对话
             cursor.execute("""
-                UPDATE conversations SET is_active = 0 
+                UPDATE conversations SET is_active = 0
                 WHERE id = ? AND user_id = ?
             """, (conv_id, user_id))
             success = cursor.rowcount > 0
-            
+
             # 如果只剩一个或删除后没有对话，重置编号
             if active_count <= 1:
                 # 硬删除所有已软删除的对话
@@ -313,7 +311,7 @@ class Database:
                         cursor.execute("INSERT INTO messages (conversation_id, role, content, created_at) VALUES (1, ?, ?, ?)", msg)
                     # 更新用户设置
                     cursor.execute("UPDATE user_settings SET active_conversation_id = 1 WHERE user_id = ?", (user_id,))
-            
+
             conn.commit()
             return success
 
@@ -332,25 +330,25 @@ class Database:
         """Delete all conversations for a user and reset IDs."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            
+
             # 获取删除数量
             cursor.execute("""
                 SELECT COUNT(*) FROM conversations WHERE user_id = ? AND is_active = 1
             """, (user_id,))
             count = cursor.fetchone()[0]
-            
+
             # 先删除消息（外键约束）
             cursor.execute("DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)", (user_id,))
             # 再删除对话
             cursor.execute("DELETE FROM conversations WHERE user_id = ?", (user_id,))
-            
+
             # 重置自增ID
             cursor.execute("DELETE FROM sqlite_sequence WHERE name = 'conversations'")
             cursor.execute("DELETE FROM sqlite_sequence WHERE name = 'messages'")
-            
+
             # 清除用户设置中的活跃对话
             cursor.execute("UPDATE user_settings SET active_conversation_id = NULL WHERE user_id = ?", (user_id,))
-            
+
             conn.commit()
             return count
 
@@ -363,18 +361,18 @@ class Database:
                 SELECT COUNT(*) FROM conversations WHERE user_id = ? AND is_active = 1
             """, (user_id,))
             conv_count = cursor.fetchone()[0]
-            
+
             # 软删除所有对话
             cursor.execute("""
                 UPDATE conversations SET is_active = 0 WHERE user_id = ?
             """, (user_id,))
-            
+
             # 清除用户设置
             cursor.execute("""
-                UPDATE user_settings SET active_conversation_id = NULL, voice_mode = 0 
+                UPDATE user_settings SET active_conversation_id = NULL, voice_mode = 0
                 WHERE user_id = ?
             """, (user_id,))
-            
+
             conn.commit()
             return {"conversations_deleted": conv_count}
 
@@ -400,19 +398,19 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT role, content FROM messages 
+                SELECT role, content FROM messages
                 WHERE conversation_id = ?
                 ORDER BY created_at ASC
                 LIMIT ?
             """, (conversation_id, limit))
             return [{"role": row["role"], "content": row["content"]} for row in cursor.fetchall()]
 
-    def get_first_message(self, conversation_id: int) -> Optional[str]:
+    def get_first_message(self, conversation_id: int) -> str | None:
         """Get the first user message in a conversation."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT content FROM messages 
+                SELECT content FROM messages
                 WHERE conversation_id = ? AND role = 'user'
                 ORDER BY created_at ASC
                 LIMIT 1
@@ -429,7 +427,7 @@ class Database:
 
     # ==================== 用户设置 ====================
 
-    def get_active_conversation(self, user_id: int) -> Optional[int]:
+    def get_active_conversation(self, user_id: int) -> int | None:
         """Get user's active conversation ID."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -439,7 +437,7 @@ class Database:
             row = cursor.fetchone()
             return row["active_conversation_id"] if row else None
 
-    def set_active_conversation(self, user_id: int, conv_id: Optional[int]) -> None:
+    def set_active_conversation(self, user_id: int, conv_id: int | None) -> None:
         """Set user's active conversation."""
         with self._get_connection() as conn:
             cursor = conn.cursor()

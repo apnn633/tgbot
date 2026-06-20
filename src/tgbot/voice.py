@@ -12,12 +12,13 @@ import tempfile
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import urlencode, quote
+from urllib.parse import quote
 
 import httpx
-from openai import AsyncOpenAI, APIError, APIConnectionError
+from openai import APIError, AsyncOpenAI
 
 from .config import config
+from .prompts import TRANSLATION_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ def _get_stt_client() -> AsyncOpenAI:
 
 def extract_japanese(text: str) -> str | None:
     """Extract Japanese text from LLM output.
-    
+
     Supports both JSON format and XML tag format.
     JSON format: {"zh": "...", "ja": "..."}
     XML format: <ja>...</ja>
@@ -80,7 +81,7 @@ def extract_japanese(text: str) -> str | None:
             return data["ja"]
     except json.JSONDecodeError:
         pass
-    
+
     # 回退到 XML 标签格式
     match = re.search(r"<ja>\s*(.+?)\s*</ja>", text, re.DOTALL)
     if match:
@@ -90,11 +91,11 @@ def extract_japanese(text: str) -> str | None:
 
 def extract_chinese(text: str) -> str | None:
     """Extract Chinese text from LLM output.
-    
+
     Supports both JSON format and XML tag format.
     JSON format: {"zh": "...", "ja": "..."}
     XML format: <zh>...</zh>
-    
+
     Returns None if no valid format found.
     """
     # 尝试 JSON 格式
@@ -104,7 +105,7 @@ def extract_chinese(text: str) -> str | None:
             return data["zh"]
     except json.JSONDecodeError:
         pass
-    
+
     # 回退到 XML 标签格式
     match = re.search(r"<zh>\s*(.+?)\s*</zh>", text, re.DOTALL)
     if match:
@@ -121,7 +122,7 @@ def has_correct_format(text: str) -> bool:
             return True
     except json.JSONDecodeError:
         pass
-    
+
     # 检查 XML 格式
     return bool(re.search(r"<zh>.+?</zh>", text, re.DOTALL)) and \
            bool(re.search(r"<ja>.+?</ja>", text, re.DOTALL))
@@ -135,7 +136,7 @@ async def translate_to_japanese(text: str) -> str:
         response = await client.chat.completions.create(
             model=config.get_chat_config().model,
             messages=[
-                {"role": "system", "content": "你是一个翻译助手。将用户输入的中文翻译成日语。只输出翻译结果。"},
+                {"role": "system", "content": TRANSLATION_PROMPT},
                 {"role": "user", "content": text}
             ],
             max_tokens=500,
@@ -180,15 +181,15 @@ async def generate_voice_openai(text: str) -> bytes:
 # ============================================================
 async def generate_voice_inworld(text: str) -> bytes:
     """Generate voice using InworldTTS API.
-    
+
     InworldTTS支持即时语音克隆，需要先在Portal创建语音获取voiceId。
-    
+
     配置步骤:
     1. 访问 https://inworld.ai 注册账号
     2. Portal → Settings → API Keys → 复制 Base64 credentials
     3. Portal → TTS Playground → Create Voice → Clone (上传5-15秒音频)
     4. 获取 voiceId
-    
+
     API支持12种语言，48kHz音频输出。
     """
     if not config.is_inworld_configured():
@@ -214,7 +215,7 @@ async def generate_voice_inworld(text: str) -> bytes:
                 },
             )
             response.raise_for_status()
-            
+
             # 返回音频数据
             result = response.json()
             if "audioContent" in result:
@@ -288,7 +289,7 @@ async def transcribe_openai(audio_data: bytes) -> str:
 # ============================================================
 async def transcribe_xunfei(audio_data: bytes) -> str:
     """Transcribe audio using Xunfei (讯飞) 语音听写流式版API.
-    
+
     支持60秒以内音频，支持中文、英文及方言。
     音频格式: pcm, speex, speex-wb, mp3 (仅中文和英文)
     采样率: 16k 或 8k
@@ -301,11 +302,11 @@ async def transcribe_xunfei(audio_data: bytes) -> str:
     # ========== 生成鉴权URL ==========
     host = "iat-api.xfyun.cn"
     path = "/v2/iat"
-    
+
     # 生成RFC1123格式时间戳
     now = datetime.utcnow()
     date = now.strftime("%a, %d %b %Y %H:%M:%S GMT")
-    
+
     # 生成签名
     signature_origin = f"host: {host}\ndate: {date}\nGET {path} HTTP/1.1"
     signature_sha = hmac.new(
@@ -314,11 +315,11 @@ async def transcribe_xunfei(audio_data: bytes) -> str:
         hashlib.sha256,
     ).digest()
     signature = base64.b64encode(signature_sha).decode()
-    
+
     # authorization_origin格式
     authorization_origin = f'api_key="{config.xunfei_api_key}", algorithm="hmac-sha256", headers="host date request-line", signature="{signature}"'
     authorization = base64.b64encode(authorization_origin.encode()).decode()
-    
+
     # 构建WebSocket URL
     ws_url = f"wss://{host}{path}?authorization={authorization}&date={quote(date)}&host={host}"
 
@@ -329,19 +330,19 @@ async def transcribe_xunfei(audio_data: bytes) -> str:
         tmp_path = tmp.name
 
     pcm_path = tmp_path.replace(".ogg", ".pcm")
-    
+
     try:
         subprocess.run(
             ["ffmpeg", "-i", tmp_path, "-f", "s16le", "-ar", "16000", "-ac", "1", "-y", pcm_path],
             check=True,
             capture_output=True,
         )
-        
+
         with open(pcm_path, "rb") as f:
             pcm_data = f.read()
     except subprocess.CalledProcessError as e:
         logger.error(f"FFmpeg error: {e.stderr.decode() if e.stderr else 'unknown'}")
-        raise RuntimeError(f"Audio conversion failed: {e}")
+        raise RuntimeError(f"Audio conversion failed: {e}") from None
     finally:
         Path(tmp_path).unlink(missing_ok=True)
         Path(pcm_path).unlink(missing_ok=True)
@@ -354,10 +355,10 @@ async def transcribe_xunfei(audio_data: bytes) -> str:
     try:
         async with websockets.connect(ws_url, open_timeout=30) as ws:
             total_len = len(pcm_data)
-            
+
             for i in range(0, total_len, frame_size):
                 frame = pcm_data[i : i + frame_size]
-                
+
                 # 确定帧状态: 0=首帧, 1=中间帧, 2=最后一帧
                 if i == 0:
                     status = 0
@@ -365,7 +366,7 @@ async def transcribe_xunfei(audio_data: bytes) -> str:
                     status = 2
                 else:
                     status = 1
-                
+
                 # 构建请求数据
                 if status == 0:
                     data = {
@@ -402,16 +403,16 @@ async def transcribe_xunfei(audio_data: bytes) -> str:
                             "audio": base64.b64encode(frame).decode()
                         }
                     }
-                
+
                 await ws.send(json.dumps(data))
                 await asyncio.sleep(frame_interval)
-                
+
                 # 接收结果
                 try:
                     while True:
                         response = await asyncio.wait_for(ws.recv(), timeout=0.5)
                         result = json.loads(response)
-                        
+
                         if result.get("code") == 0:
                             data_result = result.get("data", {})
                             if "result" in data_result:
@@ -423,8 +424,8 @@ async def transcribe_xunfei(audio_data: bytes) -> str:
                             error_msg = result.get("message", "Unknown error")
                             logger.error(f"Xunfei STT error: {error_msg}")
                             raise Exception(f"Xunfei STT error: {error_msg}")
-                            
-                except asyncio.TimeoutError:
+
+                except TimeoutError:
                     pass
     except Exception as e:
         logger.error(f"Xunfei STT WebSocket error: {e}")
@@ -438,7 +439,7 @@ async def transcribe_xunfei(audio_data: bytes) -> str:
 # ============================================================
 async def transcribe_audio(audio_data: bytes) -> str:
     """Transcribe audio to text.
-    
+
     Routes to appropriate STT provider based on config.
     """
     try:
@@ -473,7 +474,7 @@ async def convert_ogg_to_wav(ogg_data: bytes) -> bytes:
             return f.read()
     except subprocess.CalledProcessError as e:
         logger.error(f"FFmpeg conversion error: {e.stderr.decode() if e.stderr else 'unknown'}")
-        raise RuntimeError(f"Audio conversion failed: {e}")
+        raise RuntimeError(f"Audio conversion failed: {e}") from None
     finally:
         Path(ogg_path).unlink(missing_ok=True)
         Path(wav_path).unlink(missing_ok=True)

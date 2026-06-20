@@ -3,7 +3,6 @@
 import argparse
 import logging
 import sys
-from pathlib import Path
 
 from rich.console import Console
 from rich.logging import RichHandler
@@ -25,7 +24,7 @@ def setup_logging(
     quiet: bool = False,
 ) -> None:
     """Configure logging.
-    
+
     Args:
         pretty: 美化日志输出（彩色）
         debug: 调试模式（显示所有日志）
@@ -34,13 +33,13 @@ def setup_logging(
     """
     level = logging.DEBUG if debug else logging.INFO
     handlers = []
-    
+
     # 第三方库日志级别
     if not debug:
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("httpcore").setLevel(logging.WARNING)
         logging.getLogger("telegram").setLevel(logging.WARNING)
-    
+
     # 文件日志（完整格式）
     if log_file:
         file_handler = logging.FileHandler(log_file, mode="a", encoding='utf-8')
@@ -49,7 +48,7 @@ def setup_logging(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         ))
         handlers.append(file_handler)
-    
+
     # 控制台日志
     if not quiet:
         if pretty:
@@ -72,7 +71,7 @@ def setup_logging(
                 "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
             ))
             handlers.append(stream_handler)
-    
+
     logging.basicConfig(
         level=level,
         handlers=handlers,
@@ -127,7 +126,7 @@ def main() -> None:
 
     # 设置日志
     pretty_logging = args.pretty and not args.no_pretty
-    
+
     setup_logging(
         pretty=pretty_logging,
         debug=args.debug,
@@ -139,10 +138,9 @@ def main() -> None:
         console.print("[bold cyan]═══════════════════════════════════════[/]")
         console.print("[bold cyan]   丛雨 Telegram Bot 启动中...[/]")
         console.print("[bold cyan]═══════════════════════════════════════[/]")
-        console.print(f"[green]对话模型:[/] [yellow]{config.chat_model}[/]")
-        console.print(f"[green]多模态模型:[/] [yellow]{config.multimodal_model}[/]")
-        console.print(f"[green]STT 服务:[/] [yellow]{config.stt_provider}[/]")
-        console.print(f"[green]TTS 服务:[/] [yellow]{config.tts_provider}[/]")
+        summary = config.get_config_summary()
+        for label, value in summary.items():
+            console.print(f"[green]{label}:[/] [yellow]{value}[/]")
         if args.output:
             console.print(f"[green]日志文件:[/] [cyan]{args.output}[/]")
         if args.debug:

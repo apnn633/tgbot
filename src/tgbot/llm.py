@@ -3,13 +3,24 @@
 import asyncio
 import base64
 import logging
-from typing import Optional
 
-from openai import AsyncOpenAI, APIError, APIConnectionError, RateLimitError
+from openai import APIConnectionError, APIError, AsyncOpenAI, RateLimitError
 
 from .config import config
+from .constants import (
+    IMAGE_MIME_TYPES,
+    MAX_CONVERSATION_NAME_AUTO,
+    MAX_HISTORY_MESSAGES,
+    MULTIMODAL_MODE_DISABLED,
+    MULTIMODAL_MODE_TWO_STEP,
+)
 from .database import db
-from .prompts import SYSTEM_PROMPT, VOICE_MODE_PROMPT
+from .prompts import (
+    CONVERSATION_NAMING_PROMPT,
+    IMAGE_ANALYSIS_PROMPT,
+    SYSTEM_PROMPT,
+    VOICE_MODE_PROMPT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +35,22 @@ def is_qwen_vl_model(model: str) -> bool:
     return "qwen" in model.lower() and "vl" in model.lower()
 
 
+def _detect_image_mime(image_data: bytes) -> str:
+    """Detect image MIME type from file header bytes."""
+    header = image_data[:8]
+    for magic_bytes, mime_type in IMAGE_MIME_TYPES.items():
+        if header[:len(magic_bytes)] == magic_bytes:
+            return mime_type
+    # Check WEBP separately (needs offset)
+    if header[:4] == b'RIFF' and header[4:8] != b'\x00\x00\x00' and image_data[8:12] == b'WEBP':
+        return "image/webp"
+    return "image/jpeg"
+
+
 class LLMClient:
     """Handles communication with the LLM API."""
 
     def __init__(self):
-        # 对话客户端 (DeepSeek / OpenAI)
         chat_cfg = config.get_chat_config()
         self.chat_client = AsyncOpenAI(
             api_key=chat_cfg.api_key,
@@ -37,7 +59,6 @@ class LLMClient:
         )
         self.chat_model = chat_cfg.model
 
-        # 多模态客户端 (无问芯穹 / OpenAI Vision)
         multimodal_cfg = config.get_multimodal_config()
         self.multimodal_client = AsyncOpenAI(
             api_key=multimodal_cfg.api_key,
@@ -45,13 +66,13 @@ class LLMClient:
             timeout=config.api_timeout,
         )
         self.multimodal_model = multimodal_cfg.model
-        
+
         self.max_retries = config.api_max_retries
 
     async def _call_with_retry(self, client: AsyncOpenAI, model: str, messages: list, max_tokens: int) -> str:
-        """Call API with retry logic."""
+        """Call API with retry logic and exponential backoff."""
         last_error = None
-        
+
         for attempt in range(self.max_retries):
             try:
                 response = await client.chat.completions.create(
@@ -59,7 +80,6 @@ class LLMClient:
                     messages=messages,
                     max_tokens=max_tokens,
                 )
-                # 检查响应是否有效
                 if not response.choices:
                     logger.warning(f"Empty response from API, retrying... (attempt {attempt + 1}/{self.max_retries})")
                     await asyncio.sleep(1)
@@ -68,7 +88,7 @@ class LLMClient:
                 return content or ""
             except RateLimitError as e:
                 last_error = e
-                wait_time = 2 ** attempt  # 指数退避
+                wait_time = 2 ** attempt
                 logger.warning(f"Rate limit hit, waiting {wait_time}s before retry (attempt {attempt + 1}/{self.max_retries})")
                 await asyncio.sleep(wait_time)
             except APIConnectionError as e:
@@ -79,37 +99,65 @@ class LLMClient:
             except APIError as e:
                 last_error = e
                 logger.error(f"API error: {e}")
-                break  # API 错误不重试
+                break
             except Exception as e:
                 last_error = e
                 logger.error(f"Unexpected error during API call: {e}")
                 break
-        
+
         raise last_error or Exception("API call failed after retries")
 
-    def _get_or_create_conversation(self, user_id: int) -> int:
-        """Get or create active conversation for user."""
-        db.ensure_user_settings(user_id)
-        
-        conv_id = db.get_active_conversation(user_id)
-        if conv_id:
-            # 检查对话是否存在且活跃
-            conv = db.get_conversation(conv_id)
-            if conv and conv.is_active:
-                return conv_id
-        
-        # 创建新对话
-        conv = db.create_conversation(user_id, "新对话")
-        db.set_active_conversation(user_id, conv.id)
-        logger.info(f"Created new conversation {conv.id} for user {user_id}")
-        return conv.id
+    async def _call_multimodal(
+        self,
+        content: list[dict],
+        system_prompt: str,
+        mode: str,
+    ) -> str:
+        """Execute multimodal API call based on mode.
 
-    def _get_history(self, conversation_id: int) -> list[dict]:
-        """Get conversation history."""
-        messages = db.get_messages(conversation_id)
-        history = [{"role": "system", "content": SYSTEM_PROMPT}]
-        history.extend(messages)
-        return history
+        Args:
+            content: The multimodal content (image/video + text).
+            system_prompt: System prompt for the API call.
+            mode: "two_step" or "direct".
+
+        Returns:
+            The generated response text.
+        """
+        if mode == MULTIMODAL_MODE_TWO_STEP:
+            # Step 1: Multimodal analysis
+            description = await self._call_with_retry(
+                self.multimodal_client,
+                self.multimodal_model,
+                [
+                    {"role": "system", "content": IMAGE_ANALYSIS_PROMPT},
+                    {"role": "user", "content": content}
+                ],
+                config.max_tokens,
+            )
+            logger.info(f"Description: {description}")
+
+            # Step 2: Chat generation
+            response = await self._call_with_retry(
+                self.chat_client,
+                self.chat_model,
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"这是内容描述：\n{description}\n\n请以丛雨的身份对此发表看法。"}
+                ],
+                config.max_tokens,
+            )
+            return response
+        else:
+            # Direct mode
+            return await self._call_with_retry(
+                self.multimodal_client,
+                self.multimodal_model,
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": content}
+                ],
+                config.max_tokens,
+            )
 
     async def _call_multimodal_with_fallback(
         self,
@@ -117,100 +165,57 @@ class LLMClient:
         content_args: tuple,
         system_prompt: str,
         mode: str,
-        image_description: str = None,
     ) -> tuple[str, bool]:
         """Call multimodal API with URL fallback support.
-        
+
         Args:
             build_content_func: Function to build content (_build_image_content or _build_video_content)
             content_args: Arguments for build_content_func (data, prompt_text, url)
             system_prompt: System prompt for the API call
             mode: "two_step" or "direct"
-            image_description: Description from first step (for two_step mode)
-        
+
         Returns:
             tuple: (response, used_url) - API response and whether URL was used
         """
         multimodal_content, used_url = build_content_func(*content_args)
-        
+
         try:
-            if mode == "two_step":
-                # 第一步：多模态分析
-                description = await self._call_with_retry(
-                    self.multimodal_client,
-                    self.multimodal_model,
-                    [
-                        {"role": "system", "content": "你是一个图像分析助手，请客观详细地描述图片内容。"},
-                        {"role": "user", "content": multimodal_content}
-                    ],
-                    config.max_tokens,
-                )
-                logger.info(f"Description: {description}")
-                
-                # 第二步：对话生成
-                response = await self._call_with_retry(
-                    self.chat_client,
-                    self.chat_model,
-                    [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"这是内容描述：\n{description}\n\n请以丛雨的身份对此发表看法。"}
-                    ],
-                    config.max_tokens,
-                )
-            else:
-                # 直接模式
-                response = await self._call_with_retry(
-                    self.multimodal_client,
-                    self.multimodal_model,
-                    [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": multimodal_content}
-                    ],
-                    config.max_tokens,
-                )
+            response = await self._call_multimodal(multimodal_content, system_prompt, mode)
             return response, used_url
-            
+
         except Exception as e:
-            # URL 失败时回退到 Base64
-            if used_url:
-                logger.warning(f"URL failed, falling back to Base64: {e}")
-                config._url_fallback_needed = True
-                # 重建内容，不使用 URL
-                new_args = (content_args[0], content_args[1], None)
-                multimodal_content, _ = build_content_func(*new_args)
-                
-                if mode == "two_step":
-                    description = await self._call_with_retry(
-                        self.multimodal_client,
-                        self.multimodal_model,
-                        [
-                            {"role": "system", "content": "你是一个图像分析助手，请客观详细地描述图片内容。"},
-                            {"role": "user", "content": multimodal_content}
-                        ],
-                        config.max_tokens,
-                    )
-                    logger.info(f"Description (base64 fallback): {description}")
-                    response = await self._call_with_retry(
-                        self.chat_client,
-                        self.chat_model,
-                        [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": f"这是内容描述：\n{description}\n\n请以丛雨的身份对此发表看法。"}
-                        ],
-                        config.max_tokens,
-                    )
-                else:
-                    response = await self._call_with_retry(
-                        self.multimodal_client,
-                        self.multimodal_model,
-                        [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": multimodal_content}
-                        ],
-                        config.max_tokens,
-                    )
-                return response, False
-            raise
+            if not used_url:
+                raise
+
+            # URL failed, fall back to Base64
+            logger.warning(f"URL failed, falling back to Base64: {e}")
+            config._url_fallback_needed = True
+            new_args = (content_args[0], content_args[1], None)
+            multimodal_content, _ = build_content_func(*new_args)
+            response = await self._call_multimodal(multimodal_content, system_prompt, mode)
+            return response, False
+
+    def _get_or_create_conversation(self, user_id: int) -> int:
+        """Get or create active conversation for user."""
+        db.ensure_user_settings(user_id)
+
+        conv_id = db.get_active_conversation(user_id)
+        if conv_id:
+            conv = db.get_conversation(conv_id)
+            if conv and conv.is_active:
+                return conv_id
+
+        conv = db.create_conversation(user_id, "新对话")
+        db.set_active_conversation(user_id, conv.id)
+        logger.info(f"Created new conversation {conv.id} for user {user_id}")
+        return conv.id
+
+    def _get_history(self, conversation_id: int) -> list[dict]:
+        """Get conversation history with system prompt."""
+        messages = db.get_messages(conversation_id, limit=MAX_HISTORY_MESSAGES)
+        history = [{"role": "system", "content": SYSTEM_PROMPT}]
+        history.extend(messages)
+        return history
 
     def create_new_conversation(self, user_id: int, name: str = "新对话") -> int:
         """Create a new conversation for user."""
@@ -237,51 +242,38 @@ class LLMClient:
             return True
         return False
 
-    async def generate_response(
-        self,
-        user_id: int,
-        text: str,
-    ) -> str:
+    async def generate_response(self, user_id: int, text: str) -> str:
         """Generate a response for the given text using chat API."""
         conv_id = self._get_or_create_conversation(user_id)
         history = self._get_history(conv_id)
-        
-        # 添加用户消息
         history.append({"role": "user", "content": text})
 
         assistant_message = await self._call_with_retry(
             self.chat_client, self.chat_model, history, config.max_tokens
         )
-        
-        # 保存消息到数据库
+
         db.add_message(conv_id, "user", text)
         db.add_message(conv_id, "assistant", assistant_message)
 
         return assistant_message
 
-    async def generate_response_with_japanese(
-        self,
-        user_id: int,
-        text: str,
-    ) -> str:
+    async def generate_response_with_japanese(self, user_id: int, text: str) -> str:
         """Generate a response with both Chinese and Japanese for voice mode."""
+        from .voice import extract_chinese
+
         conv_id = self._get_or_create_conversation(user_id)
-        
-        # 构建临时历史（包含语音模式提示）
+
         voice_system_prompt = SYSTEM_PROMPT + VOICE_MODE_PROMPT
         temp_history = [{"role": "system", "content": voice_system_prompt}]
-        
-        # 添加用户历史
-        messages = db.get_messages(conv_id)
+
+        messages = db.get_messages(conv_id, limit=MAX_HISTORY_MESSAGES)
         temp_history.extend(messages)
         temp_history.append({"role": "user", "content": text})
 
         result = await self._call_with_retry(
             self.chat_client, self.chat_model, temp_history, config.max_tokens
         )
-        
-        # 更新实际历史（只保存中文部分）
-        from .voice import extract_chinese
+
         chinese_only = extract_chinese(result) or result
         db.add_message(conv_id, "user", text)
         db.add_message(conv_id, "assistant", chinese_only)
@@ -297,41 +289,27 @@ class LLMClient:
         self,
         image_data: bytes,
         prompt_text: str = "请以丛雨的身份对这张图片发表看法。",
-        image_url: Optional[str] = None,
+        image_url: str | None = None,
     ) -> tuple[list[dict], bool]:
         """Build multimodal content for image analysis.
-        
+
         Returns:
-            tuple: (content, used_url) - content 列表和是否使用了 URL
+            tuple: (content, used_url) - content list and whether URL was used
         """
         content = [{"type": "text", "text": prompt_text}]
         used_url = False
 
         model = self.multimodal_model
-        
-        # 检测图片格式
-        header = image_data[:8]
-        if header[:3] == b'\xff\xd8\xff':
-            mime_type = "image/jpeg"
-        elif header[:4] == b'\x89PNG':
-            mime_type = "image/png"
-        elif header[:6] in (b'GIF87a', b'GIF89a'):
-            mime_type = "image/gif"
-        elif header[:4] == b'RIFF' and header[8:12] == b'WEBP':
-            mime_type = "image/webp"
-        else:
-            mime_type = "image/jpeg"  # 默认
-        
-        # 优先使用 URL（如果有且模型支持）
+        mime_type = _detect_image_mime(image_data)
+
         if image_url and is_glm_model(model) and not config.force_base64_image:
             content.append({
                 "type": "image_url",
                 "image_url": {"url": image_url}
             })
             used_url = True
-            logger.info(f"Using image URL for GLM model")
+            logger.info("Using image URL for GLM model")
         else:
-            # 使用 Base64（GLM 和 Qwen 都支持）
             base64_image = base64.b64encode(image_data).decode("utf-8")
             content.append({
                 "type": "image_url",
@@ -350,25 +328,25 @@ class LLMClient:
         self,
         video_data: bytes,
         prompt_text: str = "请以丛雨的身份对这个视频发表看法。",
-        video_url: Optional[str] = None,
+        video_url: str | None = None,
     ) -> tuple[list[dict], bool]:
         """Build multimodal content for video analysis.
-        
+
         Returns:
-            tuple: (content, used_url) - content 列表和是否使用了 URL
+            tuple: (content, used_url) - content list and whether URL was used
         """
         content = [{"type": "text", "text": prompt_text}]
         used_url = False
 
         model = self.multimodal_model
-        
+
         if video_url and is_glm_model(model) and not config.force_base64_image:
             content.append({
                 "type": "video_url",
                 "video_url": {"url": video_url}
             })
             used_url = True
-            logger.info(f"Using video URL for GLM model")
+            logger.info("Using video URL for GLM model")
         else:
             base64_video = base64.b64encode(video_data).decode("utf-8")
             content.append({
@@ -388,38 +366,28 @@ class LLMClient:
         self,
         user_id: int,
         image_data: bytes,
-        caption: Optional[str] = None,
-        image_url: Optional[str] = None,
+        caption: str | None = None,
+        image_url: str | None = None,
     ) -> str:
-        """Analyze an image and generate a response.
-        
-        Modes:
-        - two_step: Multimodal AI analyzes -> Chat AI generates response
-        - direct: Multimodal AI directly responds
-        """
-        from .prompts import SYSTEM_PROMPT
+        """Analyze an image and generate a response."""
         conv_id = self._get_or_create_conversation(user_id)
         mode = config.get_multimodal_mode()
-        
-        if mode == "disabled":
+
+        if mode == MULTIMODAL_MODE_DISABLED:
             return "唔……我看不到图片呢 (；´д｀)\n请联系管理员配置多模态功能。"
-        
-        # 构建提示词
+
         analyze_prompt = "请详细描述这张图片的内容，包括场景、人物、物品、氛围等。"
         if caption:
             analyze_prompt = f"图片说明: {caption}\n{analyze_prompt}"
-        
-        # 调用封装的方法
+
         response, _ = await self._call_multimodal_with_fallback(
             self._build_image_content,
             (image_data, analyze_prompt, image_url),
             SYSTEM_PROMPT,
             mode,
         )
-        
+
         logger.info(f"AI response: {response}")
-        
-        # 保存消息
         db.add_message(conv_id, "user", f"[图片]{caption or ''}")
         db.add_message(conv_id, "assistant", response)
 
@@ -429,23 +397,22 @@ class LLMClient:
         self,
         user_id: int,
         image_data: bytes,
-        caption: Optional[str] = None,
-        image_url: Optional[str] = None,
+        caption: str | None = None,
+        image_url: str | None = None,
     ) -> str:
         """Analyze an image and generate response with Chinese and Japanese for voice mode."""
-        from .prompts import SYSTEM_PROMPT, VOICE_MODE_PROMPT
+        from .voice import extract_chinese
+
         conv_id = self._get_or_create_conversation(user_id)
         mode = config.get_multimodal_mode()
-        
-        if mode == "disabled":
+
+        if mode == MULTIMODAL_MODE_DISABLED:
             return "唔……我看不到图片呢 (；´д｀)\n请联系管理员配置多模态功能。"
-        
-        # 构建提示词
+
         analyze_prompt = "请详细描述这张图片的内容，包括场景、人物、物品、氛围等。"
         if caption:
             analyze_prompt = f"图片说明: {caption}\n{analyze_prompt}"
-        
-        # 调用封装的方法
+
         system_prompt = SYSTEM_PROMPT + VOICE_MODE_PROMPT
         result, _ = await self._call_multimodal_with_fallback(
             self._build_image_content,
@@ -453,11 +420,9 @@ class LLMClient:
             system_prompt,
             mode,
         )
-        
+
         logger.info(f"AI response: {result}")
-        
-        # 保存消息（只保存中文部分）
-        from .voice import extract_chinese
+
         chinese_only = extract_chinese(result) or result
         db.add_message(conv_id, "user", f"[图片]{caption or ''}")
         db.add_message(conv_id, "assistant", chinese_only)
@@ -468,45 +433,32 @@ class LLMClient:
         self,
         user_id: int,
         video_data: bytes,
-        caption: Optional[str] = None,
-        video_url: Optional[str] = None,
+        caption: str | None = None,
+        video_url: str | None = None,
     ) -> str:
         """Analyze a video and generate a response."""
-        from .prompts import SYSTEM_PROMPT
         conv_id = self._get_or_create_conversation(user_id)
         mode = config.get_multimodal_mode()
-        
-        if mode == "disabled":
+
+        if mode == MULTIMODAL_MODE_DISABLED:
             return "唔……我看不到视频呢 (；´д｀)\n请联系管理员配置多模态功能。"
-        
-        # 构建提示词
+
         analyze_prompt = "请详细描述这个视频的内容，包括场景、人物、动作、氛围等。"
         if caption:
             analyze_prompt = f"视频说明: {caption}\n{analyze_prompt}"
-        
-        # 调用封装的方法
+
         response, _ = await self._call_multimodal_with_fallback(
             self._build_video_content,
             (video_data, analyze_prompt, video_url),
             SYSTEM_PROMPT,
             mode,
         )
-        
+
         logger.info(f"AI response: {response}")
-        
-        # 保存消息
         db.add_message(conv_id, "user", f"[视频]{caption or ''}")
         db.add_message(conv_id, "assistant", response)
 
         return response
-
-    async def process_voice_message(
-        self,
-        user_id: int,
-        transcript: str,
-    ) -> str:
-        """Process transcribed voice and generate response."""
-        return await self.generate_response(user_id, transcript)
 
     async def generate_conversation_name(self, first_message: str) -> str:
         """Generate a name for a conversation based on the first message."""
@@ -516,20 +468,19 @@ class LLMClient:
                 self.chat_model,
                 [
                     {
-                        "role": "system", 
-                        "content": "你是一个对话命名助手。根据用户的第一条消息，生成一个简短的对话名称（不超过10个字）。只返回名称，不要其他内容。"
+                        "role": "system",
+                        "content": CONVERSATION_NAMING_PROMPT
                     },
                     {
-                        "role": "user", 
+                        "role": "user",
                         "content": f"请为以下对话生成一个简短的名称：\n{first_message[:200]}"
                     }
                 ],
                 20,
             )
-            # 清理名称，移除引号等
             name = result.strip().strip('"\'').strip()
-            if len(name) > 20:
-                name = name[:20]
+            if len(name) > MAX_CONVERSATION_NAME_AUTO:
+                name = name[:MAX_CONVERSATION_NAME_AUTO]
             return name
         except Exception as e:
             logger.error(f"Error generating conversation name: {e}")
